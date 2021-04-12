@@ -1,4 +1,4 @@
 all:
-	clang main.c -Ofast -o main
+	clang simul.c -Ofast -fno-math-errno -o main
 debug:
-	clang main.c -Ofast -D DEBUG -o main
+	clang simul.c -Ofast -D DEBUG -o main

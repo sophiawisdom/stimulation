@@ -1,6 +1,7 @@
 #include "stdbool.h"
 #include <stdlib.h>
 #include <stdio.h>
+#include <time.h>
 
 typedef enum PolicyResult {
     Right, // go right, even if it means waiting
@@ -12,13 +13,19 @@ struct simul;
 typedef PolicyResult (*PolicyFunc)(struct simul * test);
 
 struct simul {
+    int time_waiting;
+    char move_sequence[128]; // stored as an *inline* sequence of bools. this means max width+height is 1024
+    int cur_move;
+
     int block_height;
     int block_width;
     int blocks_high;
     int blocks_wide;
     int street_width;
 
-    int **times; // times[3][6] is block (x=3, y=6)
+    // simulation -> times[effective_x * simulation -> blocks_high + effective_y]
+
+    int *times; // times[3 * simulation -> blocks_high + 6] is block (x=3, y=6)
 
     int current_x; // start at 0, 0
     bool x_right; // true: we're at the right of the block. false: we're at the left of the block
@@ -35,10 +42,10 @@ struct simul {
 int stoplight_wait(struct simul *simulation, PolicyResult direction) {
     int effective_x = simulation -> current_x - !simulation->x_right + 1;
     int effective_y = simulation -> current_y - !simulation->y_top + 1;
-    #ifdef DEBUG
+#ifdef DEBUG
     printf("effective_x is %d, effective_y is %d\n", effective_x, effective_y);
-    #endif
-    int stoplight_time = simulation->times[effective_x][effective_y];
+#endif
+    int stoplight_time = simulation -> times[effective_x * simulation -> blocks_high + effective_y];
 
     int current_time = simulation -> cur_t % (simulation -> stoplight_time * 3);
     int cycle_time = simulation -> stoplight_time * 3;
@@ -73,7 +80,9 @@ bool step_simul(struct simul *simulation) {
         printf("Handling right response\n");
 #endif
         if (simulation -> x_right) { // we're at the right, so if we go right now we're crossing the street
-            simulation -> cur_t += simulation->street_width + stoplight_wait(simulation, response);
+            int wait_time = stoplight_wait(simulation, response);
+            simulation -> time_waiting += wait_time;
+            simulation -> cur_t += simulation->street_width + wait_time;
             simulation -> x_right = false;
             simulation -> current_x += 1;
         } else { // here we're crossing the block
@@ -85,7 +94,9 @@ bool step_simul(struct simul *simulation) {
         printf("Handling top response\n");
 #endif
         if (simulation -> y_top) { // we're at the top, so we're crossing the street here
-            simulation->cur_t += simulation->street_width + stoplight_wait(simulation, response);
+            int wait_time = stoplight_wait(simulation, response);
+            simulation -> time_waiting += wait_time;
+            simulation->cur_t += simulation->street_width + wait_time;
             simulation -> y_top = false;
             simulation -> current_y += 1;
         } else {
@@ -94,7 +105,13 @@ bool step_simul(struct simul *simulation) {
         }
     } else {
         fprintf(stderr, "Erroneous policy function %p, returned response %d\n", simulation->policy, response);
+        return false;
     }
+
+    if (response == Top) {
+        simulation -> move_sequence[simulation -> cur_move /8] |= 1 << (simulation -> cur_move % 8);
+    }
+    simulation -> cur_move += 1;
 
     if ((simulation -> current_x + 1) == simulation -> blocks_wide &&
         (simulation -> current_y + 1) == simulation -> blocks_high &&
@@ -126,19 +143,29 @@ struct simul * init_simul(int blocks_wide, int blocks_high, int block_height, in
     simulation -> block_height = block_height;
     simulation -> street_width = street_width;
 
+    // diagnostics...
+    simulation -> cur_move = 0;
+    simulation -> time_waiting = 0;
+
     simulation -> stoplight_time = stoplight_time;
 
     simulation -> x_right = false;
     simulation -> y_top = false;
 
-    srandomdev();
+    // POSSIBLE OPTIMIZATION:
+    // currently this is O(width*height), but could be improved to O(width+height) if we just generate the numbers on-demand...
+    // this could make the policy network more annoying though
+    // ANOTHER POSSIBLY OPTIMIZATION:
+    // alloca() this array
 
-    simulation -> times = malloc(sizeof(int *) * blocks_wide);
+    // This is >half the overall time at 300x300 array
+
+    simulation -> times = malloc(sizeof(int *) * blocks_wide * blocks_high); // allocing as a single array vs a series of arrays shaves off 16% of the total time
     for (int i = 0; i < blocks_wide+1; i++) {
-        simulation -> times[i] = malloc(sizeof(int) * blocks_high);
+        int x = i * simulation -> blocks_high;
         for (int j = 0; j < blocks_high+1; j++) {
             // total times is stoplight_time*3, variance is from 1/3-2/3 of time...
-            simulation -> times[i][j] = stoplight_time + (random() % stoplight_time);
+            simulation -> times[x+j] = stoplight_time + (random() % stoplight_time);
         }
     }
 
@@ -151,12 +178,19 @@ struct simul * init_simul(int blocks_wide, int blocks_high, int block_height, in
 }
 
 int main() {
+    srandomdev();
     int s = clock();
-    struct simul *simulation = init_simul(30, 30, 5, 5, 10, 2, NULL);
-    while (step_simul(simulation)){}
+
+    unsigned long long total = 0;
+    for (int i = 0; i < 1000000; i++) {
+        // simulation is currently at ~100,000x faster than the putative time it measures
+        struct simul *simulation = init_simul(300, 300, 5, 5, 10, 2, NULL);
+        while (step_simul(simulation)){}
+        total += simulation->cur_t;
+    }
 
     int j = clock();
 
-    printf("Took %d seconds (%d seconds irl)!\n", simulation->cur_t, j-s);
+    printf("Took %llu seconds (%d seconds irl)!\n", total/1000, j-s);
     return 0;
 }
